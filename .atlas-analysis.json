@@ -1,0 +1,86 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "LangGraph Supervisor",
+  "projectDescription": "A Python library for building hierarchical multi-agent systems where specialized agents are orchestrated by a central supervisor using LangGraph.",
+  "theme": "palm",
+  "primaryColor": "#060814",
+  "lightColor": "#7ccafa",
+  "darkColor": "#3c5c7c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/supervisor-architecture",
+              "concepts/agent-handoff",
+              "concepts/message-history"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/customizing-handoff-tools",
+              "guides/message-forwarding",
+              "guides/multi-level-hierarchies",
+              "guides/adding-memory",
+              "guides/functional-api",
+              "guides/agent-name-modes"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Functions",
+            "pages": [
+              "api-reference/create-supervisor",
+              "api-reference/create-handoff-tool",
+              "api-reference/create-forward-message-tool"
+            ]
+          },
+          {
+            "group": "Types",
+            "pages": [
+              "api-reference/types"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Create a supervisor agent to orchestrate multiple specialized sub-agents",
+    "Tool-based agent handoff mechanism for seamless communication between agents",
+    "Flexible message history management with full_history and last_message modes",
+    "Multi-level hierarchical supervisor systems",
+    "Built-in support for streaming, short-term and long-term memory, and human-in-the-loop",
+    "Custom handoff tools with configurable names, descriptions, and task descriptions",
+    "Message forwarding to preserve response fidelity and save tokens",
+    "Parallel tool call control for OpenAI and Anthropic models",
+    "Support for both Graph API and Functional API agent workflows"
+  ],
+  "publicApiSurface": [
+    "create_supervisor(agents, *, model, tools, prompt, response_format, pre_model_hook, post_model_hook, parallel_tool_calls, state_schema, context_schema, output_mode, add_handoff_messages, handoff_tool_prefix, add_handoff_back_messages, supervisor_name, include_agent_name) -> StateGraph",
+    "create_handoff_tool(*, agent_name, name, description, add_handoff_messages) -> BaseTool",
+    "create_forward_message_tool(supervisor_name) -> BaseTool",
+    "OutputMode = Literal['full_history', 'last_message']",
+    "AgentNameMode = Literal['inline']",
+    "METADATA_KEY_HANDOFF_DESTINATION",
+    "with_agent_name(model, agent_name_mode) -> LanguageModelLike",
+    "add_inline_agent_name(message) -> BaseMessage",
+    "remove_inline_agent_name(message) -> BaseMessage",
+    "create_handoff_back_messages(agent_name, supervisor_name) -> tuple[AIMessage, ToolMessage]"
+  ]
+}
