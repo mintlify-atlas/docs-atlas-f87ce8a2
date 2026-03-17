@@ -1,0 +1,129 @@
+---
+title: "Agent name modes"
+description: "Control how agent names are surfaced to the supervisor LLM using the include_agent_name parameter."
+---
+
+When multiple agents respond within a supervisor workflow, the supervisor LLM needs to know which agent produced each message. The `include_agent_name` parameter on `create_supervisor` controls how this information is communicated.
+
+## The `include_agent_name` parameter
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    include_agent_name=None,        # default
+    # include_agent_name="inline",  # alternative
+)
+```
+
+Accepts two values:
+
+| Value | Behavior |
+|---|---|
+| `None` (default) | Relies on the LLM provider surfacing the `name` attribute on `AIMessage`. Currently, only OpenAI supports this natively. |
+| `"inline"` | Wraps message content with XML tags encoding the agent name directly in the text. Works with any LLM provider. |
+
+## `None` mode (default)
+
+In `None` mode, agent names are carried on the `.name` attribute of `AIMessage` objects. The supervisor LLM sees the agent name only if the underlying provider surfaces message names in its API (currently only OpenAI).
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph_supervisor import create_supervisor
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    # include_agent_name defaults to None
+)
+```
+
+<Note>
+If you are using a non-OpenAI provider and need the supervisor to distinguish between agents by name, use `"inline"` mode instead.
+</Note>
+
+## `"inline"` mode
+
+In `"inline"` mode, agent names are embedded directly into the message content using XML-style tags:
+
+```
+<name>agent_name</name><content>How can I help you?</content>
+```
+
+This format is injected before the message is passed to the supervisor LLM and stripped from the output after the LLM responds.
+
+```python
+from langchain_anthropic import ChatAnthropic
+from langgraph_supervisor import create_supervisor
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=ChatAnthropic(model="claude-3-5-sonnet-20241022"),
+    include_agent_name="inline",
+)
+```
+
+## `with_agent_name`
+
+The `include_agent_name` parameter internally calls `with_agent_name` to wrap the model. You can also use `with_agent_name` directly to attach name formatting to any `LanguageModelLike`:
+
+```python
+from langgraph_supervisor.agent_name import with_agent_name
+
+formatted_model = with_agent_name(model, agent_name_mode="inline")
+```
+
+`with_agent_name` wraps the model in a chain that:
+
+1. Applies `add_inline_agent_name` to each input message before sending to the LLM.
+2. Applies `remove_inline_agent_name` to the output message after the LLM responds.
+
+## `add_inline_agent_name` and `remove_inline_agent_name`
+
+These lower-level functions operate on individual `BaseMessage` objects.
+
+### `add_inline_agent_name`
+
+Wraps the content of an `AIMessage` with `<name>` and `<content>` XML tags:
+
+```python
+from langgraph_supervisor.agent_name import add_inline_agent_name
+from langchain_core.messages import AIMessage
+
+msg = AIMessage(content="Here are the results.", name="research_expert")
+formatted = add_inline_agent_name(msg)
+# formatted.content == "<name>research_expert</name><content>Here are the results.</content>"
+```
+
+For messages with content blocks (e.g., Anthropic-style tool use), only the first text block is wrapped; other blocks are preserved.
+
+### `remove_inline_agent_name`
+
+Parses out the `<content>` text from a tagged message, returning the original content:
+
+```python
+from langgraph_supervisor.agent_name import remove_inline_agent_name
+from langchain_core.messages import AIMessage
+
+msg = AIMessage(
+    content="<name>research_expert</name><content>Here are the results.</content>",
+    name="research_expert",
+)
+cleaned = remove_inline_agent_name(msg)
+# cleaned.content == "Here are the results."
+```
+
+If the message does not contain the expected XML tags, it is returned unchanged.
+
+<Note>
+Both `add_inline_agent_name` and `remove_inline_agent_name` only process `AIMessage` instances. Other message types (e.g., `HumanMessage`, `ToolMessage`) are returned as-is.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Customizing handoff tools" href="/guides/customizing-handoff-tools">
+    Customize the tools used to transfer control between agents.
+  </Card>
+  <Card title="Message forwarding" href="/guides/message-forwarding">
+    Forward agent responses directly to the user without rephrasing.
+  </Card>
+</CardGroup>

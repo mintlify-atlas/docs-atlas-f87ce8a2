@@ -1,0 +1,218 @@
+---
+title: "Supervisor architecture"
+description: "How create_supervisor builds a StateGraph with a central supervisor agent that routes tasks to specialized worker agents."
+---
+
+`create_supervisor` constructs a LangGraph `StateGraph` where a central **supervisor agent** orchestrates one or more specialized **worker agents**. The supervisor is itself a `create_react_agent`-based ReAct agent equipped with handoff tools — one per worker agent — that it calls to delegate tasks.
+
+## Graph structure
+
+The compiled graph has a fixed topology: the supervisor node sits at the center, every worker node has a direct edge back to the supervisor, and the graph terminates (`END`) only when the supervisor decides to stop.
+
+```
+              ┌───────┐
+    ┌─────────│ START │─────────┐
+    │         └───────┘         │
+    │                           ▼
+    │                   ┌────────────────┐
+    │      ┌────────────│   supervisor   │◄───────────────────┐
+    │      │            └────────────────┘                    │
+    │      │ transfer_to_agent_a  transfer_to_agent_b         │
+    │      ▼                           ▼                      │
+    │  ┌─────────┐               ┌─────────┐                  │
+    │  │ agent_a │               │ agent_b │                  │
+    │  └────┬────┘               └────┬────┘                  │
+    │       └───────────────────────┬─┘                       │
+    │                               └─────────────────────────┘
+    │
+    └─────► END  (supervisor returns a final answer)
+```
+
+In code, `create_supervisor` produces this structure by:
+
+1. Building a `ToolNode` that contains all handoff tools (one per worker agent) plus any extra tools you supply.
+2. Wrapping that `ToolNode` inside a `create_react_agent` call to form the supervisor node.
+3. Adding each worker agent as its own node, wired so that every worker edge returns to the supervisor.
+
+```python
+# Simplified view of what create_supervisor does internally
+builder = StateGraph(workflow_schema)
+builder.add_node(supervisor_agent, destinations=tuple(agent_names) + (END,))
+builder.add_edge(START, supervisor_agent.name)
+for agent in agents:
+    builder.add_node(agent.name, _make_call_agent(agent, output_mode, ...))
+    builder.add_edge(agent.name, supervisor_agent.name)
+```
+
+## Creating and compiling the graph
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph_supervisor import create_supervisor
+from langgraph.prebuilt import create_react_agent
+
+model = ChatOpenAI(model="gpt-4o")
+
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return "search results..."
+
+math_agent = create_react_agent(
+    model=model,
+    tools=[add],
+    name="math_expert",
+    prompt="You are a math expert.",
+)
+
+research_agent = create_react_agent(
+    model=model,
+    tools=[web_search],
+    name="research_expert",
+    prompt="You are a world class researcher. Do not do any math.",
+)
+
+# create_supervisor returns an uncompiled StateGraph
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    prompt="You are a team supervisor. Route math questions to math_expert and research questions to research_expert.",
+)
+
+# Compile before invoking
+app = workflow.compile()
+
+result = app.invoke({
+    "messages": [{"role": "user", "content": "What is 2 + 2?"}]
+})
+```
+
+<Note>
+  `create_supervisor` returns an **uncompiled** `StateGraph`. You must call `.compile()` before invoking it. This is intentional — it lets you pass a `checkpointer` or `store` to `.compile()` for memory support.
+</Note>
+
+## Key parameters
+
+### `supervisor_name`
+
+Sets the name of the supervisor node in the graph. Defaults to `"supervisor"`. Use a distinct name when building multi-level hierarchies so that handoff-back messages reference the correct node.
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    supervisor_name="research_supervisor",
+)
+```
+
+### `state_schema`
+
+Overrides the default state schema (`AgentState`) used for both the supervisor agent and the outer workflow graph. Use this to add custom state fields that worker agents and the supervisor can read and write.
+
+```python
+from typing import Annotated
+from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict
+
+class MyState(TypedDict):
+    messages: Annotated[list, add_messages]
+    task_context: str
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    state_schema=MyState,
+)
+```
+
+### `output_mode`
+
+Controls how a worker agent's message history is merged back into the supervisor's shared state after each invocation. See [Message history](/concepts/message-history) for a full explanation.
+
+<Tabs>
+  <Tab title="last_message (default)">
+    ```python
+    workflow = create_supervisor(
+        [research_agent, math_agent],
+        model=model,
+        output_mode="last_message",  # default
+    )
+    ```
+    Only the final message produced by the worker is added to the shared message history.
+  </Tab>
+  <Tab title="full_history">
+    ```python
+    workflow = create_supervisor(
+        [research_agent, math_agent],
+        model=model,
+        output_mode="full_history",
+    )
+    ```
+    The entire message history produced by the worker — including intermediate tool calls — is added to the shared message history.
+  </Tab>
+</Tabs>
+
+### `parallel_tool_calls`
+
+Controls whether the supervisor LLM can call multiple handoff tools in a single response, handing control to multiple worker agents simultaneously.
+
+```python
+# Allow the supervisor to invoke multiple agents in one step
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    parallel_tool_calls=True,
+)
+```
+
+<Info>
+  `parallel_tool_calls` is only supported by OpenAI and Anthropic models. For other providers, add explicit instructions to the system prompt to control tool-calling behavior.
+</Info>
+
+<Warning>
+  Certain OpenAI reasoning models (`o3-mini`, `o3`, `o4-mini`) do not support disabling parallel tool calls. LangGraph Supervisor detects this automatically and skips the `parallel_tool_calls` binding for those models.
+</Warning>
+
+## Multi-level hierarchies
+
+Because `create_supervisor` returns a `StateGraph`, you can compile it with a `name` and pass it as a worker agent to another supervisor — creating arbitrarily deep hierarchies.
+
+```python
+research_team = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    supervisor_name="research_supervisor",
+).compile(name="research_team")
+
+writing_team = create_supervisor(
+    [writing_agent, publishing_agent],
+    model=model,
+    supervisor_name="writing_supervisor",
+).compile(name="writing_team")
+
+top_level_supervisor = create_supervisor(
+    [research_team, writing_team],
+    model=model,
+    supervisor_name="top_level_supervisor",
+).compile(name="top_level_supervisor")
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Agent handoff" icon="arrow-right-arrow-left" href="/concepts/agent-handoff">
+    How the supervisor uses tool calls to delegate to worker agents
+  </Card>
+  <Card title="Message history" icon="messages" href="/concepts/message-history">
+    How message history accumulates across agent calls
+  </Card>
+  <Card title="Customizing handoff tools" icon="wrench" href="/guides/customizing-handoff-tools">
+    Change tool names, add arguments, and customize handoff behavior
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/create-supervisor">
+    Full parameter reference for `create_supervisor`
+  </Card>
+</CardGroup>

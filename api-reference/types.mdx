@@ -1,0 +1,172 @@
+---
+title: "Types & Constants"
+description: "Public types, type aliases, metadata constants, and utility functions exported by langgraph-supervisor."
+---
+
+## Type Aliases
+
+### `OutputMode`
+
+```python
+OutputMode = Literal["full_history", "last_message"]
+```
+
+Controls how a managed subagent's output messages are added to the supervisor's message history after the subagent finishes.
+
+| Value | Description |
+|---|---|
+| `"last_message"` | Add only the last message produced by the agent. If the last message is a `ToolMessage`, both the preceding `AIMessage` and the `ToolMessage` are included. |
+| `"full_history"` | Add the entire message history produced during the agent's invocation. |
+
+Used as the `output_mode` parameter of [`create_supervisor`](/api-reference/create-supervisor).
+
+---
+
+### `AgentNameMode`
+
+```python
+AgentNameMode = Literal["inline"]
+```
+
+Specifies how subagent names are embedded in `AIMessage` content before being passed to the supervisor LLM.
+
+| Value | Description |
+|---|---|
+| `"inline"` | Wraps the message content with XML-style `<name>` and `<content>` tags so the LLM can identify which agent produced each message. Example: `"Hello"` → `"<name>math_expert</name><content>Hello</content>"`. The tags are stripped from the model's own output before it is stored in state. |
+
+Used as the `include_agent_name` parameter of [`create_supervisor`](/api-reference/create-supervisor).
+
+<Note>
+  When `include_agent_name` is `None` (the default), the supervisor LLM sees agent names only through the `name` attribute on `AIMessage` objects, which only OpenAI models currently surface to the model at inference time.
+</Note>
+
+---
+
+## Metadata Constants
+
+### `METADATA_KEY_HANDOFF_DESTINATION`
+
+```python
+METADATA_KEY_HANDOFF_DESTINATION = "__handoff_destination"
+```
+
+String key written into a handoff tool's `.metadata` dict and into the `response_metadata` of the resulting `ToolMessage`. The value is the `agent_name` of the target subagent.
+
+`create_supervisor` inspects this key to detect whether custom handoff tools have been provided, and to validate that all subagents have a corresponding handoff tool.
+
+---
+
+### `METADATA_KEY_IS_HANDOFF_BACK`
+
+```python
+METADATA_KEY_IS_HANDOFF_BACK = "__is_handoff_back"
+```
+
+String key written into the `response_metadata` of the synthetic `(AIMessage, ToolMessage)` pair that is appended to the message history when a subagent returns control to the supervisor (controlled by the `add_handoff_back_messages` parameter of `create_supervisor`).
+
+This key is used internally by `create_forward_message_tool` to skip handoff-back messages when searching for the latest substantive message from an agent.
+
+---
+
+## Utility Functions
+
+### `with_agent_name`
+
+```python
+def with_agent_name(
+    model: LanguageModelLike,
+    agent_name_mode: AgentNameMode,
+) -> LanguageModelLike
+```
+
+Wraps a language model so that agent names are formatted into (and stripped out of) messages as they pass through the model. Returns a `LanguageModelLike` chain.
+
+`create_supervisor` calls this automatically when `include_agent_name` is set.
+
+<Note>
+  Agent name is consumed from the `message.name` field. Agents built with `create_react_agent` set this automatically. Custom agents must set `name` on the `AIMessage` returned by the LLM.
+</Note>
+
+**Parameters**
+
+<ParamField path="model" type="LanguageModelLike" required>
+  Language model to wrap with agent name formatting.
+</ParamField>
+
+<ParamField path="agent_name_mode" type="AgentNameMode" required>
+  How to format agent names. Currently only `"inline"` is supported.
+</ParamField>
+
+---
+
+### `add_inline_agent_name`
+
+```python
+def add_inline_agent_name(message: BaseMessage) -> BaseMessage
+```
+
+Adds `<name>` and `<content>` XML tags to the content of an `AIMessage`. Non-`AIMessage` types and messages without a `name` are returned unchanged. Handles both plain string content and multi-block content lists.
+
+**Examples:**
+
+```python
+from langchain_core.messages import AIMessage
+from langgraph_supervisor.agent_name import add_inline_agent_name
+
+add_inline_agent_name(AIMessage(content="Hello", name="assistant"))
+# AIMessage(content="<name>assistant</name><content>Hello</content>", name="assistant")
+
+add_inline_agent_name(
+    AIMessage(content=[{"type": "text", "text": "Hello"}], name="assistant")
+)
+# AIMessage(content=[{"type": "text", "text": "<name>assistant</name><content>Hello</content>"}], name="assistant")
+```
+
+---
+
+### `remove_inline_agent_name`
+
+```python
+def remove_inline_agent_name(message: BaseMessage) -> BaseMessage
+```
+
+Reverses `add_inline_agent_name` by stripping `<name>…</name><content>…</content>` tags from the message content, leaving only the inner content text. Messages without the expected tags are returned unchanged.
+
+**Examples:**
+
+```python
+from langchain_core.messages import AIMessage
+from langgraph_supervisor.agent_name import remove_inline_agent_name
+
+remove_inline_agent_name(
+    AIMessage(content="<name>assistant</name><content>Hello</content>", name="assistant")
+)
+# AIMessage(content="Hello", name="assistant")
+```
+
+---
+
+### `create_handoff_back_messages`
+
+```python
+def create_handoff_back_messages(
+    agent_name: str,
+    supervisor_name: str,
+) -> tuple[AIMessage, ToolMessage]
+```
+
+Creates the synthetic `(AIMessage, ToolMessage)` pair that represents a subagent returning control to the supervisor. Both messages have `METADATA_KEY_IS_HANDOFF_BACK: True` in their `response_metadata`.
+
+The generated tool name follows the pattern `transfer_back_to_<supervisor_name>`.
+
+`create_supervisor` calls this automatically when `add_handoff_back_messages` is `True`.
+
+**Parameters**
+
+<ParamField path="agent_name" type="str" required>
+  The name of the subagent that is returning control.
+</ParamField>
+
+<ParamField path="supervisor_name" type="str" required>
+  The name of the supervisor node receiving control.
+</ParamField>

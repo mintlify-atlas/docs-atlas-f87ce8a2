@@ -1,0 +1,143 @@
+---
+title: "Customizing handoff tools"
+description: "Learn how to customize the handoff tools used by the supervisor to transfer control between agents."
+---
+
+By default, `create_supervisor` automatically generates handoff tools for each agent you register. You can customize these tools in several ways — changing their names and descriptions, controlling which messages are added to state, or writing a fully custom implementation.
+
+## Changing tool name and description
+
+Use `create_handoff_tool` with explicit `name` and `description` arguments, then pass the tools directly to `create_supervisor`:
+
+```python
+from langgraph_supervisor import create_supervisor, create_handoff_tool
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    tools=[
+        create_handoff_tool(
+            agent_name="math_expert",
+            name="assign_to_math_expert",
+            description="Assign task to math expert",
+        ),
+        create_handoff_tool(
+            agent_name="research_expert",
+            name="assign_to_research_expert",
+            description="Assign task to research expert",
+        ),
+    ],
+    model=model,
+)
+```
+
+<Note>
+When you provide custom handoff tools, you must provide one for **every** agent registered with the supervisor. Missing tools for any agent will raise a `ValueError`.
+</Note>
+
+## Customizing the tool name prefix
+
+If you want to rename all auto-generated handoff tools at once without creating each tool manually, use the `handoff_tool_prefix` parameter on `create_supervisor`:
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    handoff_tool_prefix="delegate_to_",
+)
+# Creates tools named: delegate_to_research_expert, delegate_to_math_expert
+```
+
+The default prefix (when `handoff_tool_prefix` is not set) produces tools named `transfer_to_<agent_name>`.
+
+## Disabling handoff messages
+
+By default, each handoff adds a pair of `(AIMessage, ToolMessage)` to the message history to record that a transfer occurred. You can suppress these messages:
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    add_handoff_messages=False,
+)
+```
+
+This produces a more concise message history at the cost of less visibility into which agent handled each step.
+
+## Writing a fully custom handoff tool
+
+You can implement your own handoff tool from scratch. A common reason to do this is to let the supervisor pass a structured task description to the next agent.
+
+The only requirement for a custom handoff tool to be recognized by `create_supervisor` is that it carries the `METADATA_KEY_HANDOFF_DESTINATION` metadata key:
+
+```python
+from typing import Annotated
+
+from langchain_core.tools import tool, BaseTool, InjectedToolCallId
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
+from langgraph.prebuilt import InjectedState
+from langgraph_supervisor.handoff import METADATA_KEY_HANDOFF_DESTINATION
+
+
+def create_custom_handoff_tool(
+    *, agent_name: str, name: str | None, description: str | None
+) -> BaseTool:
+
+    @tool(name, description=description)
+    def handoff_to_agent(
+        # The supervisor LLM populates this argument with a task description
+        task_description: Annotated[
+            str,
+            "Detailed description of what the next agent should do, "
+            "including all of the relevant context.",
+        ],
+        # Inject the full state of the calling graph
+        state: Annotated[dict, InjectedState],
+        tool_call_id: Annotated[str, InjectedToolCallId],
+    ):
+        tool_message = ToolMessage(
+            content=f"Successfully transferred to {agent_name}",
+            name=name,
+            tool_call_id=tool_call_id,
+        )
+        messages = state["messages"]
+        return Command(
+            goto=agent_name,
+            graph=Command.PARENT,
+            # State update applied to the parent (supervisor) graph
+            update={
+                "messages": messages + [tool_message],
+                "active_agent": agent_name,
+                # Pass the task description to the next agent.
+                # NOTE: individual agents need `task_description` in their state schema
+                # and must implement logic to consume it.
+                "task_description": task_description,
+            },
+        )
+
+    # Required: tells create_supervisor which agent this tool hands off to
+    handoff_to_agent.metadata = {METADATA_KEY_HANDOFF_DESTINATION: agent_name}
+    return handoff_to_agent
+```
+
+<Warning>
+The `METADATA_KEY_HANDOFF_DESTINATION` key is required. Without it, `create_supervisor` will not recognize your tool as a handoff tool and will raise a `ValueError` about missing handoff destinations.
+</Warning>
+
+### Using `InjectedState` and `InjectedToolCallId`
+
+| Annotation | Purpose |
+|---|---|
+| `InjectedState` | Injects the full graph state at call time. The LLM does not see this argument. |
+| `InjectedToolCallId` | Injects the tool call ID needed to construct a valid `ToolMessage`. The LLM does not see this argument. |
+
+Any argument that is **not** annotated with an `Injected*` type will be visible to the LLM and can be populated by it — such as `task_description` in the example above.
+
+<CardGroup cols={2}>
+  <Card title="Message forwarding" href="/guides/message-forwarding">
+    Forward an agent's response directly to the user without the supervisor rephrasing it.
+  </Card>
+  <Card title="Agent name modes" href="/guides/agent-name-modes">
+    Control how agent names are surfaced to the supervisor LLM.
+  </Card>
+</CardGroup>

@@ -1,0 +1,66 @@
+---
+title: "create_forward_message_tool"
+description: "Create a tool that lets the supervisor forward a subagent's latest message to the user verbatim."
+---
+
+The `create_forward_message_tool` function returns a `BaseTool` named `forward_message`. When called by the supervisor's LLM, the tool finds the most recent non-handoff `AIMessage` from a specified subagent and forwards it to the user without modification, avoiding information loss that can occur when the supervisor paraphrases or rewrites a worker's response.
+
+## Signature
+
+```python
+def create_forward_message_tool(
+    supervisor_name: str = "supervisor",
+) -> BaseTool
+```
+
+## Parameters
+
+<ParamField path="supervisor_name" type="str" default="supervisor">
+  The name of the supervisor node. Used to namespace the forwarded message — the output `AIMessage` will carry this value as its `name` attribute.
+</ParamField>
+
+## Returns
+
+<ResponseField name="BaseTool" type="BaseTool">
+  A LangChain `BaseTool` with the fixed name `"forward_message"`.
+
+  **Tool argument:** `from_agent: str` — the name of the subagent whose latest message should be forwarded.
+
+  The tool searches `state["messages"]` in reverse order for the most recent `AIMessage` whose `name` matches `from_agent` (case-insensitive) and that is not a handoff-back message. It then issues a `Command` that appends a copy of that message (attributed to `supervisor_name`) to the parent graph's state.
+
+  If no matching message is found, the tool returns an error string listing the agent names it did find.
+</ResponseField>
+
+## Example
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph_supervisor import create_supervisor, create_forward_message_tool
+
+def generate_report(topic: str) -> str:
+    '''Generate a detailed report on the given topic.'''
+    return "Detailed report on " + topic + "..."
+
+report_agent = create_react_agent(
+    model="openai:gpt-4o",
+    tools=[generate_report],
+    name="report_agent",
+)
+
+# Pass the forward_message tool to the supervisor
+workflow = create_supervisor(
+    [report_agent],
+    model=ChatOpenAI(model="gpt-4o"),
+    tools=[create_forward_message_tool(supervisor_name="supervisor")],
+)
+
+app = workflow.compile()
+result = app.invoke({
+    "messages": [{"role": "user", "content": "Generate a report on climate change."}]
+})
+```
+
+<Tip>
+  Use `create_forward_message_tool` when your subagents produce long-form or structured text that should reach the user exactly as written. It also saves tokens by avoiding a redundant LLM rewrite pass.
+</Tip>

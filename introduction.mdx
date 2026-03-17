@@ -1,0 +1,118 @@
+---
+title: "LangGraph Supervisor"
+description: "Build hierarchical multi-agent systems where specialized agents are orchestrated by a central supervisor."
+---
+
+<Note>
+  We now recommend using the **supervisor pattern directly via tools** for most use cases. The tool-calling approach gives you more control over context engineering. See the [LangChain multi-agent guide](https://docs.langchain.com/oss/python/langchain/multi-agent) for details. This library is being maintained for compatibility with LangChain 1.0.
+</Note>
+
+LangGraph Supervisor is a Python library for creating **hierarchical multi-agent systems** using [LangGraph](https://github.com/langchain-ai/langgraph). In a hierarchical system, specialized agents are coordinated by a central **supervisor** agent that controls communication flow and task delegation.
+
+The supervisor decides which agent to invoke based on the current context and task requirements — enabling complex, multi-step workflows that leverage the strengths of specialized agents.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Supervisor orchestration" icon="sitemap">
+    Create a central supervisor agent that routes tasks to specialized sub-agents based on context and requirements.
+  </Card>
+  <Card title="Tool-based handoff" icon="arrow-right-arrow-left">
+    Use LangGraph's tool-calling mechanism for seamless, structured communication between the supervisor and worker agents.
+  </Card>
+  <Card title="Flexible message history" icon="messages">
+    Control what gets added to the shared message history — full agent history or just the final response.
+  </Card>
+  <Card title="Multi-level hierarchies" icon="network-wired">
+    Compose supervisors into multi-tier hierarchies where supervisors manage other supervisors.
+  </Card>
+  <Card title="Memory support" icon="brain">
+    Add short-term and long-term memory via LangGraph checkpointers and stores — pass directly to `.compile()`.
+  </Card>
+  <Card title="Streaming & human-in-the-loop" icon="person-circle-check">
+    Inherits all LangGraph capabilities including streaming, interrupt/resume, and human approval flows.
+  </Card>
+</CardGroup>
+
+## How it works
+
+The supervisor pattern works by placing a **supervisor agent** at the top of the graph. When a user message arrives, the supervisor evaluates it and decides which specialized worker agent to invoke. After the worker completes its task, control returns to the supervisor, which can either respond directly or delegate to another agent.
+
+```
+User Message
+     │
+     ▼
+┌─────────────┐
+│  Supervisor │  ◄── Decides which agent to call
+└──────┬──────┘
+       │ handoff tools
+  ┌────┴────┐
+  │         │
+  ▼         ▼
+Agent A   Agent B   (specialized workers)
+```
+
+The library is built on top of LangGraph's `StateGraph` and uses tool-calling for handoffs, which means:
+- The supervisor can express structured intent about which agent to call
+- Handoff behavior is fully customizable
+- The graph is compiled like any other LangGraph graph
+
+## Installation
+
+```bash
+pip install langgraph-supervisor
+```
+
+<Info>
+  LangGraph Supervisor requires **Python 3.10 or higher**.
+</Info>
+
+## Quick example
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph_supervisor import create_supervisor
+from langgraph.prebuilt import create_react_agent
+
+model = ChatOpenAI(model="gpt-4o")
+
+math_agent = create_react_agent(
+    model=model,
+    tools=[add, multiply],
+    name="math_expert",
+    prompt="You are a math expert. Always use one tool at a time."
+)
+
+research_agent = create_react_agent(
+    model=model,
+    tools=[web_search],
+    name="research_expert",
+    prompt="You are a world class researcher. Do not do any math."
+)
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    prompt="You are a team supervisor. Route math questions to math_expert and research questions to research_expert."
+)
+
+app = workflow.compile()
+result = app.invoke({"messages": [{"role": "user", "content": "What is 15% of Amazon's 2024 headcount?"}]})
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first multi-agent supervisor in minutes
+  </Card>
+  <Card title="Supervisor architecture" icon="diagram-project" href="/concepts/supervisor-architecture">
+    Understand how the supervisor pattern works
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/create-supervisor">
+    Full reference for `create_supervisor` and related functions
+  </Card>
+  <Card title="Customizing handoff tools" icon="wrench" href="/guides/customizing-handoff-tools">
+    Customize how agents hand off control to each other
+  </Card>
+</CardGroup>

@@ -1,0 +1,117 @@
+---
+title: "Adding memory"
+description: "Persist conversation history across sessions (short-term memory) and store data across threads (long-term memory) using LangGraph checkpointers and stores."
+---
+
+`create_supervisor` returns a `StateGraph` instance. You must call `.compile()` on it before running it. The `.compile()` method accepts both a `checkpointer` (for short-term, within-thread memory) and a `store` (for long-term, cross-thread memory).
+
+## Short-term memory (checkpointing)
+
+A checkpointer persists the graph state at each step, allowing you to:
+
+- Resume interrupted runs.
+- Have multi-turn conversations within a single `thread_id`.
+- Inspect or replay past states.
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph_supervisor import create_supervisor
+
+model = ChatOpenAI(model="gpt-4o")
+
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return "Search results..."
+
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+
+research_agent = create_react_agent(model=model, tools=[web_search], name="research_expert")
+math_agent = create_react_agent(model=model, tools=[add], name="math_expert")
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    prompt="You are a team supervisor managing a research expert and a math expert.",
+)
+
+checkpointer = InMemorySaver()
+
+app = workflow.compile(checkpointer=checkpointer)
+
+# Provide a thread_id in config to enable multi-turn conversation
+config = {"configurable": {"thread_id": "thread-1"}}
+
+result = app.invoke(
+    {"messages": [{"role": "user", "content": "What are the FAANG headcounts in 2024?"}]},
+    config=config,
+)
+```
+
+<Note>
+`InMemorySaver` stores state in memory and is not durable across process restarts. For production use, replace it with a persistent checkpointer such as those provided by [LangGraph Platform](https://langchain-ai.github.io/langgraph/how-tos/persistence/).
+</Note>
+
+## Long-term memory (store)
+
+A store persists data across threads, enabling agents to remember facts, preferences, or summaries that should survive beyond a single conversation.
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph.store.memory import InMemoryStore
+from langgraph_supervisor import create_supervisor
+
+model = ChatOpenAI(model="gpt-4o")
+
+research_agent = create_react_agent(model=model, tools=[], name="research_expert")
+
+workflow = create_supervisor(
+    [research_agent],
+    model=model,
+)
+
+store = InMemoryStore()
+
+app = workflow.compile(store=store)
+```
+
+## Using both together
+
+You can pass both `checkpointer` and `store` to `.compile()` simultaneously:
+
+```python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.store.memory import InMemoryStore
+
+checkpointer = InMemorySaver()
+store = InMemoryStore()
+
+app = workflow.compile(
+    checkpointer=checkpointer,
+    store=store,
+)
+```
+
+| Parameter | Purpose | Scope |
+|---|---|---|
+| `checkpointer` | Saves graph state at each step | Per thread |
+| `store` | Stores arbitrary data accessible by agents | Cross-thread |
+
+## Further reading
+
+- [LangGraph short-term memory (persistence)](https://langchain-ai.github.io/langgraph/how-tos/persistence/)
+- [LangGraph long-term memory (cross-thread persistence)](https://langchain-ai.github.io/langgraph/how-tos/cross-thread-persistence/)
+- [LangGraph memory concepts](https://langchain-ai.github.io/langgraph/concepts/memory/)
+
+<CardGroup cols={2}>
+  <Card title="Multi-level hierarchies" href="/guides/multi-level-hierarchies">
+    Compose supervisors into nested hierarchies for complex workflows.
+  </Card>
+  <Card title="Functional API" href="/guides/functional-api">
+    Use @task and @entrypoint decorators to define agents.
+  </Card>
+</CardGroup>

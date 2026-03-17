@@ -1,0 +1,116 @@
+---
+title: "Message forwarding"
+description: "Use create_forward_message_tool to forward a worker agent's response directly to the user, preserving fidelity and saving tokens."
+---
+
+When a supervisor receives a response from a worker agent, it normally decides how to present that response to the user — which may involve rephrasing or summarizing it. This can introduce information loss and consume additional tokens.
+
+The `create_forward_message_tool` function equips the supervisor with a `forward_message` tool that lets it pass a worker's last message directly to the graph output, unchanged.
+
+## When to use message forwarding
+
+Message forwarding is useful when:
+
+- The worker's response is complete and requires no synthesis by the supervisor.
+- You want to preserve exact wording from the worker (e.g., structured data, code, or precise answers).
+- You want to reduce token usage by skipping a supervisor summarization step.
+
+<Note>
+If your workflow requires the supervisor to aggregate results from multiple agents, synthesize information, or make decisions based on agent responses, let the supervisor rephrase rather than forwarding. Forwarding exits the supervisor loop immediately.
+</Note>
+
+## Setup
+
+```bash
+pip install langgraph-supervisor langchain-openai
+
+export OPENAI_API_KEY=<your_api_key>
+```
+
+## Example
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph_supervisor import create_supervisor
+from langgraph_supervisor.handoff import create_forward_message_tool
+
+model = ChatOpenAI(model="gpt-4o")
+
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return (
+        "Here are the headcounts for each of the FAANG companies in 2024:\n"
+        "1. **Facebook (Meta)**: 67,317 employees.\n"
+        "2. **Apple**: 164,000 employees.\n"
+        "3. **Amazon**: 1,551,000 employees.\n"
+        "4. **Netflix**: 14,000 employees.\n"
+        "5. **Google (Alphabet)**: 181,269 employees."
+    )
+
+research_agent = create_react_agent(
+    model=model,
+    tools=[web_search],
+    name="research_expert",
+    prompt="You are a world class researcher with access to web search.",
+)
+
+# The argument is the name to assign to the forwarded message in the output
+forwarding_tool = create_forward_message_tool("supervisor")
+
+workflow = create_supervisor(
+    [research_agent],
+    model=model,
+    # Pass the forwarding tool alongside any handoff tools
+    tools=[forwarding_tool],
+    prompt=(
+        "You are a supervisor managing a research expert. "
+        "After receiving a response, forward it directly using the forward_message tool."
+    ),
+)
+
+app = workflow.compile()
+result = app.invoke({
+    "messages": [{"role": "user", "content": "What are the FAANG headcounts in 2024?"}]
+})
+```
+
+## The `from_agent` argument
+
+When the supervisor calls `forward_message`, it must supply a `from_agent` argument that names which agent's last message should be forwarded:
+
+```
+forward_message(from_agent="research_expert")
+```
+
+The tool searches `state["messages"]` in reverse and finds the most recent `AIMessage` whose `.name` attribute matches `from_agent` (case-insensitive). If no matching message is found, the tool returns an error string listing the agent names it did find.
+
+The forwarded message is re-emitted as a new `AIMessage` attributed to the supervisor name you passed to `create_forward_message_tool`, so the final output looks like it came from the supervisor.
+
+## How it interacts with other tools
+
+`create_forward_message_tool` returns a standard `BaseTool`. You can include it alongside default handoff tools or custom ones:
+
+```python
+from langgraph_supervisor import create_handoff_tool
+from langgraph_supervisor.handoff import create_forward_message_tool
+
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    tools=[
+        create_handoff_tool(agent_name="research_expert"),
+        create_handoff_tool(agent_name="math_expert"),
+        create_forward_message_tool("supervisor"),
+    ],
+)
+```
+
+<CardGroup cols={2}>
+  <Card title="Customizing handoff tools" href="/guides/customizing-handoff-tools">
+    Customize tool names, descriptions, and the data passed during handoff.
+  </Card>
+  <Card title="Adding memory" href="/guides/adding-memory">
+    Persist conversation history across sessions with checkpointers and stores.
+  </Card>
+</CardGroup>

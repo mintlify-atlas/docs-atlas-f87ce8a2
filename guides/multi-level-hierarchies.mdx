@@ -1,0 +1,122 @@
+---
+title: "Multi-level hierarchies"
+description: "Compose supervisors into nested hierarchies where a top-level supervisor manages teams of specialized sub-supervisors."
+---
+
+LangGraph Supervisor supports multi-level hierarchical systems where one supervisor manages other supervisors, each of which manages its own set of specialized agents.
+
+This pattern is useful when:
+
+- Your problem domain splits into distinct workstreams (e.g., research and writing).
+- You want to limit context window usage by keeping each supervisor's scope narrow.
+- You want independent teams that can be developed and tested in isolation.
+
+## How it works
+
+`create_supervisor(...)` returns a `StateGraph`. Calling `.compile(name=...)` on it produces a named compiled graph — a `CompiledStateGraph` — that behaves like any other agent and can be passed directly to another `create_supervisor` call.
+
+## Example
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+from langgraph_supervisor import create_supervisor
+
+model = ChatOpenAI(model="gpt-4o")
+
+# --- Define individual agents ---
+
+def web_search(query: str) -> str:
+    """Search the web for information."""
+    return "Search results..."
+
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+
+def write_report(content: str) -> str:
+    """Write a structured report."""
+    return f"Report: {content}"
+
+def publish(content: str) -> str:
+    """Publish content."""
+    return f"Published: {content}"
+
+research_agent = create_react_agent(
+    model=model, tools=[web_search], name="research_expert"
+)
+math_agent = create_react_agent(
+    model=model, tools=[add], name="math_expert"
+)
+writing_agent = create_react_agent(
+    model=model, tools=[write_report], name="writing_expert"
+)
+publishing_agent = create_react_agent(
+    model=model, tools=[publish], name="publishing_expert"
+)
+
+# --- Compose teams ---
+
+# Each sub-supervisor is compiled with a name so it can be used as an agent
+research_team = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    supervisor_name="research_supervisor",
+).compile(name="research_team")
+
+writing_team = create_supervisor(
+    [writing_agent, publishing_agent],
+    model=model,
+    supervisor_name="writing_supervisor",
+).compile(name="writing_team")
+
+# --- Top-level supervisor manages the teams ---
+
+top_level_supervisor = create_supervisor(
+    [research_team, writing_team],
+    model=model,
+    supervisor_name="top_level_supervisor",
+).compile(name="top_level_supervisor")
+
+result = top_level_supervisor.invoke({
+    "messages": [{"role": "user", "content": "Research FAANG headcounts and write a summary report."}]
+})
+```
+
+## Naming compiled graphs
+
+The `.compile(name=...)` call serves two purposes:
+
+1. It sets the `name` attribute on the compiled graph, which `create_supervisor` requires to generate handoff tools and route messages correctly.
+2. The name becomes the node name inside the parent supervisor's graph.
+
+<Warning>
+Every agent passed to `create_supervisor` must have a non-`None` name that is not `"LangGraph"` (the default). Always pass `name=` to `.compile()` when creating a team to be used as a sub-agent.
+</Warning>
+
+## Thread ID management in hierarchies
+
+When the supervisor invokes a `RemoteGraph` sub-agent, it automatically derives a deterministic child thread ID using UUID5 namespacing:
+
+```python
+child_thread_id = str(uuid5(UUID(str(parent_thread_id)), agent.name))
+```
+
+This means:
+
+- Each agent gets its own isolated thread namespace derived from the parent thread ID and the agent's name.
+- The same parent thread always maps to the same child thread for a given agent name — making behavior reproducible across runs.
+- This applies only to `RemoteGraph` agents. Local compiled graphs share the parent thread's checkpointer directly.
+
+<Note>
+Thread ID namespacing only applies to `RemoteGraph` agents. If you are running all agents locally (e.g., using `InMemorySaver`), all agents share the same checkpointer and thread ID.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Adding memory" href="/guides/adding-memory">
+    Add short-term and long-term memory to your hierarchical supervisor system.
+  </Card>
+  <Card title="Functional API" href="/guides/functional-api">
+    Use the Functional API to define agents with @task and @entrypoint decorators.
+  </Card>
+</CardGroup>

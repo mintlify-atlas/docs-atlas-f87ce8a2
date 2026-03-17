@@ -1,0 +1,215 @@
+---
+title: "Message history"
+description: "How messages accumulate in the shared state across supervisor and worker agent calls, and how to control what gets added."
+---
+
+In a supervisor multi-agent system, all agents share a single `messages` list in the graph state. When a worker agent completes its task, its output is merged back into that shared list. The `output_mode` parameter and two handoff message helpers — `add_handoff_messages` and `add_handoff_back_messages` — determine exactly what ends up in the history.
+
+## `OutputMode`: controlling worker output
+
+`OutputMode` is a `Literal["full_history", "last_message"]` type alias that controls how a worker agent's messages are merged into the supervisor's shared state after each invocation.
+
+### `last_message` (default)
+
+Only the final message from the worker is added. If the last message is a `ToolMessage` (which can happen when a worker calls a tool as its last step), the library adds the preceding `AIMessage` as well to keep the history valid.
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    output_mode="last_message",  # default
+)
+```
+
+Resulting history after a worker call:
+
+```
+[user] What is 2 + 2?
+[AI, supervisor] <calls transfer_to_math_expert>
+[Tool] Successfully transferred to math_expert          # handoff message (if enabled)
+[AI, math_expert] The answer is 4.                     # ← only this is added
+[AI, math_expert] <calls transfer_back_to_supervisor>  # handoff-back message (if enabled)
+[Tool] Successfully transferred back to supervisor      # handoff-back message (if enabled)
+```
+
+### `full_history`
+
+The entire message history produced by the worker — including every intermediate tool call and tool response — is added to the shared state.
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    output_mode="full_history",
+)
+```
+
+Resulting history after a worker call:
+
+```
+[user] What is the square root of 144?
+[AI, supervisor] <calls transfer_to_math_expert>
+[Tool] Successfully transferred to math_expert
+[AI, math_expert] <calls sqrt tool>                    # ┐
+[Tool] sqrt(144) = 12                                   # │ all intermediate
+[AI, math_expert] The square root of 144 is 12.        # ┘ steps included
+[AI, math_expert] <calls transfer_back_to_supervisor>
+[Tool] Successfully transferred back to supervisor
+```
+
+<Tip>
+  Use `full_history` when you want the supervisor to have complete context about what the worker did — for example, to audit intermediate steps or to provide that context to subsequent agents. Use `last_message` to keep the shared history concise.
+</Tip>
+
+<Tabs>
+  <Tab title="last_message">
+    ```python
+    workflow = create_supervisor(
+        agents=[research_agent, math_agent],
+        model=model,
+        output_mode="last_message",
+    )
+    ```
+  </Tab>
+  <Tab title="full_history">
+    ```python
+    workflow = create_supervisor(
+        agents=[research_agent, math_agent],
+        model=model,
+        output_mode="full_history",
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Handoff messages (`add_handoff_messages`)
+
+When the supervisor calls a handoff tool, by default a pair of messages is appended to the shared history before the worker agent runs:
+
+- An `AIMessage` from the supervisor containing the tool call (the handoff invocation).
+- A `ToolMessage` with `content="Successfully transferred to <agent_name>"` and `response_metadata={"__handoff_destination": "<agent_name>"}`.
+
+This pair lets the supervisor and any downstream agents understand which workers were invoked and in what order.
+
+```python
+# Default: handoff messages are included
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    add_handoff_messages=True,  # default
+)
+
+# Disable to keep history more concise
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    add_handoff_messages=False,
+)
+```
+
+The `ToolMessage` is tagged in `response_metadata` so consumers can identify it as a handoff event:
+
+```python
+tool_message.response_metadata  # {"__handoff_destination": "math_expert"}
+```
+
+## Handoff-back messages (`add_handoff_back_messages`)
+
+When control returns from a worker agent to the supervisor, the library can append another `(AIMessage, ToolMessage)` pair that explicitly marks the transition back:
+
+```
+[AI, math_expert] Transferring back to supervisor   ← synthetic AIMessage
+[Tool] Successfully transferred back to supervisor  ← synthetic ToolMessage
+```
+
+These messages are created by `create_handoff_back_messages`:
+
+```python
+from langgraph_supervisor.handoff import create_handoff_back_messages
+
+ai_msg, tool_msg = create_handoff_back_messages(
+    agent_name="math_expert",
+    supervisor_name="supervisor",
+)
+# ai_msg.name  == "math_expert"
+# ai_msg.response_metadata == {"__is_handoff_back": True}
+# tool_msg.name == "transfer_back_to_supervisor"
+# tool_msg.response_metadata == {"__is_handoff_back": True}
+```
+
+By default, `add_handoff_back_messages` inherits the value of `add_handoff_messages`. You can set them independently:
+
+```python
+workflow = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    add_handoff_messages=True,      # include forward handoff messages
+    add_handoff_back_messages=False, # omit return messages
+)
+```
+
+<Note>
+  The `__is_handoff_back` key in `response_metadata` is used internally by `create_forward_message_tool` to skip synthetic handoff-back messages when searching for real agent responses.
+</Note>
+
+## How messages accumulate across multiple agent calls
+
+Consider a workflow where the supervisor calls two agents in sequence:
+
+```python
+app = create_supervisor(
+    [research_agent, math_agent],
+    model=model,
+    output_mode="last_message",
+    add_handoff_messages=True,
+    add_handoff_back_messages=True,
+).compile()
+
+result = app.invoke({
+    "messages": [{"role": "user", "content": "What is 15% of Amazon's 2024 headcount?"}]
+})
+```
+
+The shared `messages` list accumulates in this order:
+
+```
+ 1. [Human]  What is 15% of Amazon's 2024 headcount?
+ 2. [AI, supervisor]      <calls transfer_to_research_expert>   # handoff
+ 3. [Tool]                Successfully transferred to research_expert
+ 4. [AI, research_expert] Amazon had 1,551,000 employees in 2024.  # last_message output
+ 5. [AI, research_expert] Transferring back to supervisor           # handoff-back
+ 6. [Tool]                Successfully transferred back to supervisor
+ 7. [AI, supervisor]      <calls transfer_to_math_expert>        # handoff
+ 8. [Tool]                Successfully transferred to math_expert
+ 9. [AI, math_expert]     15% of 1,551,000 is 232,650.            # last_message output
+10. [AI, math_expert]     Transferring back to supervisor          # handoff-back
+11. [Tool]                Successfully transferred back to supervisor
+12. [AI, supervisor]      The answer is 232,650.
+```
+
+With `output_mode="full_history"` the worker's intermediate steps (tool calls within the agent) would also appear at positions 4 and 9.
+
+## Configuration reference
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `output_mode` | `"last_message"` \| `"full_history"` | `"last_message"` | How worker output is merged into the shared history |
+| `add_handoff_messages` | `bool` | `True` | Add `(AIMessage, ToolMessage)` pair when handing off to a worker |
+| `add_handoff_back_messages` | `bool` | inherits `add_handoff_messages` | Add `(AIMessage, ToolMessage)` pair when returning to supervisor |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Agent handoff" icon="arrow-right-arrow-left" href="/concepts/agent-handoff">
+    How handoff tools work and how to customize them
+  </Card>
+  <Card title="Supervisor architecture" icon="diagram-project" href="/concepts/supervisor-architecture">
+    How the overall graph is structured
+  </Card>
+  <Card title="Customizing handoff tools" icon="wrench" href="/guides/customizing-handoff-tools">
+    Control what data is passed during a handoff
+  </Card>
+  <Card title="Message forwarding" icon="paper-plane" href="/guides/message-forwarding">
+    Forward a worker's response directly to the user without supervisor rewriting
+  </Card>
+</CardGroup>
